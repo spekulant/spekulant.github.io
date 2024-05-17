@@ -1,0 +1,255 @@
+<!doctype html>
+<html>
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <link rel="stylesheet" href="style.css" type="text/css" />
+        <title>Installing dmg apps with nix-darwin</title>
+    </head>
+    <body>
+        <header class="header">
+            <a class="logo" href="/blog">Blog</a>
+            <nav>
+                <a href="https://www.github.com/spekulant">github</a>
+                <a href="/about.html">about</a>
+            </nav>
+        </header>
+
+        <div class="container">
+            <h1>Adventures in installing dmg apps with nix-darwin</h1>
+            <p style="font-size: 75%">16 May 2024</p>
+            <p>
+                <strong
+                    >TLDR - Having experimented with pure nix ways of handling
+                    dmg images, I finally had to settle on an outside-sandbox
+                    approach using the MacOS's built-in
+                    <code>hdiutil</code> tool. Skip to the Final section to see
+                    how it all ties together.</strong
+                >
+            </p>
+            <p>
+                Having learned about the superb
+                <a href="https://github.com/zed-industries/zed">zed editor</a>
+                from the creators of Atom, I wanted to install it on my mac
+                machine.
+            <p>
+            </p>
+                My mac runs a nix-darwin setup with home-manager on
+                top. A lovely combo, albeit a bit more difficult to update
+                compared to competing solutions.
+            </p>
+            <p>
+                My whole setup is relatively small and simple. And so normally,
+                adding a new package is just extending my
+                <code>home.packages</code> list.
+            </p>
+            <p>
+                Looking for <code>zed</code> in the
+                <a href="https://search.nixos.org/packages"
+                    >nixos packages search tool</a
+                >
+                yielded some unrelated stuff initially. No editor package in
+                sight.
+            </p>
+            <p>
+                But I quickly realized the problem was I looked in the stable
+                channel (23.11 atm). Upon switching to Unstable, I found what I
+                was looking for. The name of the package is
+                <code>zed-editor</code> in nix world.
+            </p>
+            <p>So I just added it to my home-manager packages:</p>
+            <pre><code>home.packages = [
+    ... # other packages
+    pkgs.zed-editor
+];
+</code></pre>
+            <p>
+                Sadly, upon running <code>home-manager switch</code> I learned
+                it won't do because it's an unstable channel and I haven't
+                enabled unstable packages.
+            </p>
+            <p>
+                But to at least try, I tried to install zed-editor in the
+                current session:
+            </p>
+            <pre><code>nix-shell -p zed-editor
+</code></pre>
+            <p>
+                This failed because the
+                <a
+                    href="https://github.com/NixOS/nixpkgs/commit/636760666295252c4bbba6d4a2cb03b92ca0f862"
+                    >zed-editor build process on darwin is broken</a
+                >
+                as of the time of writing. Looking up
+                <a
+                    href="https://github.com/NixOS/nixpkgs/pull/303233#issuecomment-2048650618"
+                    >the underlying issue</a
+                >
+                I found out it was due a darwin-specific dependency on
+                <code>LiveKitBridge</code>
+                (Swift) that fails to build.
+            </p>
+            <p>
+                So, inspired by the helpful error message suggesting I may try
+                to enable broken packages, just in case it turns out to be
+                working, I tried again:
+            </p>
+            <pre><code>export NIXPKGS_ALLOW_BROKEN=1
+nix-shell -p zed-editor
+</code></pre>
+            <p>
+                This took a lot more time but eventually, the build failed due
+                to a similar error as described in the github issue.
+            </p>
+            <h2>Core of the search</h2>
+            <p>
+                This made me think there must be a way to install this somehow
+                as I checked that the pre-built distribution of the editor works
+                fine on Macs.
+            </p>
+            <p>
+                There are pre-build <code>.dmg</code> packages (images)
+                available on zed's github releases page. So I started looking
+                into installing those. This turned out to be a spiral of doom as
+                the continued efforts of the community over the last almost 10
+                years in reverse-engineering Apple's Volume formats were
+                relentlessly shut down by Apple's ever-changing volume spec,
+                starting with HFS then over to HFS+ and now finally at APFS.
+            </p>
+            <p>
+                I tried using <code>libdmg-hfsplus</code> , <code>undmg</code>,
+                <code>xpwn</code>, <code>apfs-fuse</code> and
+                <code>p7zip</code>. All of these turned out to either not work
+                with the current format of the APFS images or me not being able
+                to shake them (here, eg, xpwn) into doing the thing. This took
+                me several iterations over a config that essentially looks
+                something like this in my <code>darwin.nix</code>:
+            </p>
+            <pre><code>environment.systemPackages = with pkgs; [
+  # ... other packages
+    (pkgs.stdenv.mkDerivation {
+      name = "zed";
+      src = pkgs.fetchurl {
+        url = "https://github.com/zed-industries/zed/releases/download/v0.135.2/Zed-x86_64.dmg";
+        sha256 = "01e6ede9d5ab7e21e54e448e0a13f9d123b1106ce768a22483a8bac9285f083d";
+      };
+      buildInputs = [ pkgs.undmg pkgs.p7zip ];
+      phases = [ "unpackPhase" "installPhase" ];
+      unpackPhase = ''
+        undmg $src
+      '';
+      installPhase = ''
+        mkdir -p $out/Applications
+        cp -r $out/Zed.app $out/Applications/Zed.app
+      '';
+    })
+  ];
+</code></pre>
+            <p>
+                The most promising candidate was <code>p7zip</code>, but as of
+                the time of writing, the required update to extract APFS is
+                merged into master, albeit not yet released.
+            </p>
+            <p>
+                Having spent hours tweaking and wrangling the config, I wanted
+                to find out if there perhaps is a way to reach out into the
+                system's native tools outside the sandbox, leave the pure
+                functional world, and just install the package.
+            </p>
+            <h2>Final</h2>
+            <p>
+                Turns out there is a relatively easy way to install this, you
+                can execute arbitrary scripts in the post-setup stage, so as a
+                last resort I just 'bash'ed this into a temporary form.
+            </p>
+            <p>
+                I wrote a little <code>install_zed.sh</code> script that
+                attempts to download, mount, and install the Zed release
+                package:
+            </p>
+            <pre><code>#!/usr/bin/env bash
+set -e
+# Debugging: Print each command being executed
+set -x
+LOG_FILE="/tmp/install_zed.log"
+
+{
+    ZED_VERSION = "0.135.2"
+    if [ -f "/Applications/Zed.app/Contents/MacOS/cli" ]; then
+        INSTALLED_VERSION=$(/Applications/Zed.app/Contents/MacOS/cli --version)
+        if [ "$INSTALLED_VERSION" == "Zed $ZED_VERSION - /Applications/Zed.app" ]; then
+            echo "Chosen Zed version is already installed in /Applications"
+            exit 0
+        fi
+    fi
+
+    echo "Installing Zed v$ZED_VERSION..."
+
+    URL="https://github.com/zed-industries/zed/releases/download/v$ZED_VERSION/Zed-x86_64.dmg"
+    MOUNT_POINT="/Volumes/Zed"
+    DEST_DIR="/Applications"
+    DMG_FILE=$(mktemp)
+
+    echo "Downloading DMG to $DMG_FILE"
+    curl -L $URL -o $DMG_FILE
+
+    echo "Verifying DMG..."
+    hdiutil verify $DMG_FILE
+
+    echo "Mounting DMG..."
+    hdiutil attach $DMG_FILE -mountpoint $MOUNT_POINT
+
+    echo "Copying Zed to $DEST_DIR"
+    cp -r $MOUNT_POINT/Zed.app $DEST_DIR/Zed.app
+
+    echo "Unmounting DMG..."
+    hdiutil detach $MOUNT_POINT
+
+    echo "Cleaning up..."
+    rm $DMG_FILE
+
+    if [ -f /usr/local/bin/zed ]; then
+        sudo unlink /usr/local/bin/zed
+    fi
+    sudo ln -s /Applications/Zed.app/Contents/MacOS/cli /usr/local/bin/zed
+
+    echo "Zed installation complete!"
+} 2&gt;&amp;1 | tee $LOG_FILE
+</code></pre>
+            <p>
+                Here we use <code>hdiutil</code>, the native and pre-installed
+                tool for mounting the MacOS DMG application images. I added a
+                log file output redirection, trivial version control, and simple
+                binary linking.
+            </p>
+            <p>
+                This script lives in the same directory as all the rest of my
+                nix config, and in my <code>darwin.nix</code> (so, nix-darwin
+                config) I added this new
+                <code>system.activationScripts</code> instance:
+            </p>
+            <pre><code>{ config, pkgs, lib, ... }:
+
+{
+    # ... other config
+    system.activationScripts.installZed.text = builtins.readFile /Users/tomaszsobota/h/install_zed.sh;
+}
+</code></pre>
+            <p>
+                Then, I ran <code>darwin-rebuild switch</code>, and it worked
+                like a charm. Zed is now available in both my Spotlight search
+                (Cmd+Space) and from cli with just <code>zed</code>.
+            </p>
+            <p>Thanks, see you in the next one.</p>
+            <footer>
+                <p>
+                    Licensed under a
+                    <a href="https://creativecommons.org/licenses/by/4.0/"
+                        >Creative Commons Attribution 4.0 International
+                        license</a
+                    >
+                </p>
+            </footer>
+        </div>
+    </body>
+</html>
