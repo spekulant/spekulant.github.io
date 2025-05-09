@@ -25,6 +25,16 @@ d
 
 Be sure to inspect the resulting html file as the py package's expected md formatting is slightly different than the Github's markdown variant. (So, eg. code blocks are not marked with backticks but with four spaces)
 
+If there are any footnotes you want to refer to, wrap the section in a href and add the following id to the footnotes paragraph.
+
+```md
+[[P1](#footnotes)]
+```
+
+```html
+<h3 id="footnotes">Przypisy</h3>
+```
+
 Finally, move the output to the posts directory, remove the temporary files and link the new post in the `blog/index.html` file.
 
 ```bash
